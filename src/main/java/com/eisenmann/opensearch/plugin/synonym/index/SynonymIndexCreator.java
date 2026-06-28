@@ -2,24 +2,18 @@ package com.eisenmann.opensearch.plugin.synonym.index;
 
 import org.opensearch.common.settings.Settings;
 
-import java.io.File;
-import java.io.FileFilter;
-import java.io.FileReader;
 import java.io.IOException;
+import java.nio.file.Paths;
 
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
-import org.apache.lucene.index.IndexWriter;
-import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.index.IndexWriterConfig.OpenMode;
-import org.apache.lucene.index.LogMergePolicy;
-import org.apache.lucene.index.MergePolicy;
-import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.FSDirectory;
-import org.apache.lucene.util.Version;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.CorruptIndexException;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.IndexWriterConfig.OpenMode;
+import org.apache.lucene.store.FSDirectory;
 
 
 public class SynonymIndexCreator {
@@ -28,15 +22,13 @@ public class SynonymIndexCreator {
     private final IndexWriter writer;
     private final String indexDirectoryPath;
 
-    public SynonymIndexCreator(Settings settings)
+    public SynonymIndexCreator(Settings settings) throws IOException
     {
         indexName = settings.get("synonyms_index");
-          //this directory will contain the indexes
+        indexDirectoryPath = settings.get("synonyms_index_path", indexName);
 
-      
-
-      Directory indexDirectory = 
-         FSDirectory.open(indexDirectoryPath);
+        FSDirectory indexDirectory =
+         FSDirectory.open(Paths.get(indexDirectoryPath));
 
       //create the indexer
       writer = new IndexWriter(indexDirectory, new IndexWriterConfig(new StandardAnalyzer())
@@ -46,7 +38,7 @@ public class SynonymIndexCreator {
     }    
 
 
-   private void indexDocument() throws IOException {    
+   private void indexDocument() throws IOException {
     Document document = getDocument();
     writer.addDocument(document);
  }

@@ -3,15 +3,12 @@
  */
 package com.eisenmann.opensearch.plugin.synonym.analysis;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.text.ParseException;
 import java.util.ArrayList;
 
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.client.methods.HttpGet;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.synonym.SynonymMap;
 import org.opensearch.analysis.common.OpenSearchSolrSynonymParser;
@@ -99,22 +96,17 @@ public class DynamicSynonymIndex implements SynonymIndex {
 
     @Override
     public boolean isNeedReloadSynonymMap() {
-     logger.info("==== isNeedReloadSynonymMap ====");
-        RequestConfig rc = RequestConfig.custom()
-                .setConnectionRequestTimeout(10 * 1000)
-                .setConnectTimeout(10 * 1000).setSocketTimeout(15 * 1000)
-                .build();
-      
-                try {
+        logger.info("==== isNeedReloadSynonymMap ====");
+        try {
                       
                     Term t = new Term(RELOAD_SYNONYM_MAP_FIELD);
                    
                     Query query = new TermQuery(t);
                     TopDocs topDocs = indexSearcher.search(query, 1);
          
-                     if (topDocs.scoreDocs!=null && topDocs.scoreDocs.length>0) 
-                     {            
-                        String isNeedReload = indexReader.document(topDocs.scoreDocs[0].doc).getField("isNeedReload").stringValue();
+                     if (topDocs.scoreDocs!=null && topDocs.scoreDocs.length>0)
+                     {
+                        String isNeedReload = indexReader.storedFields().document(topDocs.scoreDocs[0].doc).getField("isNeedReload").stringValue();
                          if(isNeedReload != null && !isNeedReload.isEmpty() && isNeedReload=="y")
                          {
                            return true;
@@ -132,15 +124,8 @@ public class DynamicSynonymIndex implements SynonymIndex {
 
     @Override
     public Reader getReader() {
-          Reader reader;
-        RequestConfig rc = RequestConfig.custom()
-                .setConnectionRequestTimeout(10 * 1000)
-                .setConnectTimeout(10 * 1000).setSocketTimeout(60 * 1000)
-                .build();
+        Reader reader;
         ArrayList<String> synonyms = null;
-        BufferedReader br = null;
-        HttpGet get = new HttpGet(location);
-        get.setConfig(rc);
         try {
             synonyms = getSynonymsFromIndex();
             if (synonyms != null) {
@@ -154,16 +139,8 @@ public class DynamicSynonymIndex implements SynonymIndex {
                 reader = new StringReader(sb.toString());
             } else reader = new StringReader("");
         } catch (Exception e) {
-            logger.error("get index synonym reader {} error!", location, e); 
+            logger.error("get index synonym reader {} error!", location, e);
             reader = new StringReader("1=>1");
-        } finally {
-            try {
-                if (br != null) {
-                    br.close();
-                }
-            } catch (IOException e) {
-                logger.error("failed to close bufferedReader", e);
-            }            
         }
         return reader;
     }
@@ -192,7 +169,7 @@ public class DynamicSynonymIndex implements SynonymIndex {
 
             for (ScoreDoc topDoc : topDocs.scoreDocs) 
             {            
-               String text = indexReader.document(topDoc.doc).getField("text").stringValue();
+               String text = indexReader.storedFields().document(topDoc.doc).getField("text").stringValue();
                 if(text != null && !text.isEmpty())
                 {
                  synonyms.add(text);
