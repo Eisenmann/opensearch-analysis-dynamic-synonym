@@ -12,7 +12,7 @@ import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import org.apache.commons.codec.Charsets;
+import java.nio.charset.StandardCharsets;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.analysis.Analyzer;
@@ -85,7 +85,7 @@ public class LocalSynonymFile implements SynonymFile {
             return new StringReader("");
         }
         try (BufferedReader br = new BufferedReader(new InputStreamReader(
-                synonymFilePath.toUri().toURL().openStream(), Charsets.UTF_8))) {
+                synonymFilePath.toUri().toURL().openStream(), StandardCharsets.UTF_8))) {
             StringBuilder sb = new StringBuilder();
             String line;
             while ((line = br.readLine()) != null) {
