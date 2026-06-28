@@ -1,148 +1,154 @@
-/**
- *
- */
 package com.eisenmann.opensearch.plugin.synonym.analysis;
 
 import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.text.ParseException;
-import java.util.ArrayList;
 
-import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.synonym.SynonymMap;
-import org.opensearch.analysis.common.OpenSearchSolrSynonymParser;
-import org.opensearch.analysis.common.OpenSearchWordnetSynonymParser;
-import org.opensearch.env.Environment;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.search.IndexSearcher;
-import org.apache.lucene.search.TopDocs;
-import org.apache.lucene.search.Query;
-import org.apache.lucene.search.ScoreDoc;
-import org.apache.lucene.search.MatchAllDocsQuery;
-import org.apache.lucene.search.TermQuery;
-import org.apache.lucene.index.Term;
-
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.synonym.SynonymMap;
+import org.opensearch.action.search.SearchRequest;
+import org.opensearch.action.search.SearchResponse;
+import org.opensearch.analysis.common.OpenSearchSolrSynonymParser;
+import org.opensearch.analysis.common.OpenSearchWordnetSynonymParser;
+import org.opensearch.client.Client;
+import org.opensearch.env.Environment;
+import org.opensearch.index.query.QueryBuilders;
+import org.opensearch.search.SearchHit;
+import org.opensearch.search.builder.SearchSourceBuilder;
+import org.opensearch.search.sort.SortBuilders;
+import org.opensearch.search.sort.SortOrder;
 
 /**
- * @author eisenmann
+ * Loads synonym rules from an OpenSearch index in the local cluster.
+ *
+ * <p>Expected document format:
+ * <pre>
+ * PUT /my-synonyms/_doc/1
+ * { "synonyms": "car, automobile, vehicle" }
+ * </pre>
+ *
+ * <p>Change detection uses the maximum {@code _seq_no} across all documents
+ * combined with the total document count, so any add, update, or delete
+ * triggers a reload on the next monitor tick.
  */
 public class DynamicSynonymIndex implements SynonymIndex {
 
-    private static final Integer RESULT_LIMIT = 10000;
-    private static final String RELOAD_SYNONYM_MAP_FIELD = "lastModified";    
+    private static final int MAX_SYNONYMS = 10_000;
+    private static final Logger logger = LogManager.getLogger("dynamic-synonym-index");
 
-    private static final Logger logger = LogManager.getLogger("dynamic-synonym");    
+    private final Client client;
+    private final String indexName;
+    private final Analyzer analyzer;
+    private final boolean expand;
+    private final boolean lenient;
+    private final String format;
 
-    private String format;
+    /** Tracks the highest _seq_no seen; -1 forces reload on first check. */
+    private volatile long lastSeqNo = -1;
+    /** Tracks total document count to detect deletes. */
+    private volatile long lastTotalHits = -1;
 
-    private boolean expand;
-
-    private boolean lenient;
-
-    private Analyzer analyzer;
-
-    private Environment env;
-
-    private static IndexSearcher indexSearcher;
-
-    private static IndexReader indexReader;
-
-     /**
-     * Dynamic synonym index
-     */
-    private String location;    
-
-    DynamicSynonymIndex(Environment env, Analyzer analyzer,
-                      boolean expand, boolean lenient, String format, String location) {
+    DynamicSynonymIndex(
+            Client client,
+            Environment env,
+            Analyzer analyzer,
+            boolean expand,
+            boolean lenient,
+            String format,
+            String indexName
+    ) {
+        this.client = client;
         this.analyzer = analyzer;
         this.expand = expand;
         this.lenient = lenient;
         this.format = format;
-        this.env = env;
-        this.location = location;
-
-        isNeedReloadSynonymMap();
+        this.indexName = indexName;
     }
 
+    /**
+     * Returns {@code true} if the synonym index has been modified since the
+     * last check. Uses a lightweight search (size=1, sort by _seq_no desc)
+     * so no bulk document fetching happens during change detection.
+     */
+    @Override
+    public boolean isNeedReloadSynonymMap() {
+        try {
+            SearchSourceBuilder sourceBuilder = new SearchSourceBuilder()
+                    .query(QueryBuilders.matchAllQuery())
+                    .size(1)
+                    .sort(SortBuilders.fieldSort("_seq_no").order(SortOrder.DESC))
+                    .seqNoAndPrimaryTerm(true)
+                    .trackTotalHits(true)
+                    .fetchSource(false);
+
+            SearchResponse response = client.search(
+                    new SearchRequest(indexName).source(sourceBuilder)).actionGet();
+
+            long currentTotal = response.getHits().getTotalHits().value;
+            long currentSeqNo = response.getHits().getHits().length > 0
+                    ? response.getHits().getHits()[0].getSeqNo()
+                    : -1;
+
+            if (currentSeqNo != lastSeqNo || currentTotal != lastTotalHits) {
+                lastSeqNo = currentSeqNo;
+                lastTotalHits = currentTotal;
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            logger.warn("Cannot check synonym index '{}' for changes; skipping reload", indexName, e);
+            return false;
+        }
+    }
 
     @Override
     public SynonymMap reloadSynonymMap() {
-          Reader rulesReader = null;
         try {
-            logger.debug("start reload remote synonym from {}.", location);
-            rulesReader = getReader();
-            SynonymMap.Builder parser;
-
-            parser = getSynonymParser(rulesReader, format, expand, lenient, analyzer);
+            Reader reader = getReader();
+            SynonymMap.Builder parser = getSynonymParser(reader, format, expand, lenient, analyzer);
             return parser.build();
         } catch (Exception e) {
-            logger.error("reload remote synonym {} error!", location, e);
+            logger.error("Failed to reload synonyms from index '{}'", indexName, e);
             throw new IllegalArgumentException(
-                    "could not reload remote synonyms file to build synonyms",
-                    e);
-        } finally {
-            if (rulesReader != null) {
-                try {
-                    rulesReader.close();
-                } catch (Exception e) {
-                    logger.error("failed to close rulesReader", e);
-                }
-            }
+                    "Could not reload synonyms from index: " + indexName, e);
         }
     }
 
-    @Override
-    public boolean isNeedReloadSynonymMap() {
-        logger.info("==== isNeedReloadSynonymMap ====");
-        try {
-                      
-                    Term t = new Term(RELOAD_SYNONYM_MAP_FIELD);
-                   
-                    Query query = new TermQuery(t);
-                    TopDocs topDocs = indexSearcher.search(query, 1);
-         
-                     if (topDocs.scoreDocs!=null && topDocs.scoreDocs.length>0)
-                     {
-                        String isNeedReload = indexReader.storedFields().document(topDocs.scoreDocs[0].doc).getField("isNeedReload").stringValue();
-                         if(isNeedReload != null && !isNeedReload.isEmpty() && isNeedReload=="y")
-                         {
-                           return true;
-                         }
-                     }
-                     
-                     return false;
-                 }
-                 catch (IOException e)
-                 {
-                     logger.error("failed to get synonyms from index", e);
-                    return false;
-                 }
-    }
-
+    /**
+     * Fetches all documents from the synonym index and returns them as a
+     * {@link Reader} where each line is one synonym rule.
+     */
     @Override
     public Reader getReader() {
-        Reader reader;
-        ArrayList<String> synonyms = null;
         try {
-            synonyms = getSynonymsFromIndex();
-            if (synonyms != null) {
-                 StringBuilder sb = new StringBuilder();
+            SearchSourceBuilder sourceBuilder = new SearchSourceBuilder()
+                    .query(QueryBuilders.matchAllQuery())
+                    .size(MAX_SYNONYMS)
+                    .fetchSource(new String[]{"synonyms"}, null);
 
-                for (String line : synonyms) {
-                    logger.debug("reload in index synonym: {}", line);
-                    sb.append(line)
-                            .append(System.getProperty("line.separator"));
+            SearchResponse response = client.search(
+                    new SearchRequest(indexName).source(sourceBuilder)).actionGet();
+
+            StringBuilder sb = new StringBuilder();
+            for (SearchHit hit : response.getHits().getHits()) {
+                Object value = hit.getSourceAsMap().get("synonyms");
+                if (value != null) {
+                    String rule = value.toString().trim();
+                    if (!rule.isEmpty()) {
+                        sb.append(rule).append('\n');
+                    }
                 }
-                reader = new StringReader(sb.toString());
-            } else reader = new StringReader("");
+            }
+            logger.debug("Loaded {} synonym rules from index '{}'",
+                    response.getHits().getHits().length, indexName);
+            return new StringReader(sb.toString());
         } catch (Exception e) {
-            logger.error("get index synonym reader {} error!", location, e);
-            reader = new StringReader("1=>1");
+            logger.error("Failed to fetch synonyms from index '{}'", indexName, e);
+            return new StringReader("");
         }
-        return reader;
     }
 
     static SynonymMap.Builder getSynonymParser(
@@ -158,30 +164,4 @@ public class DynamicSynonymIndex implements SynonymIndex {
         }
         return parser;
     }
-
-    static ArrayList<String> getSynonymsFromIndex()
-    {    
-        try {   
-           Query query = new MatchAllDocsQuery();
-           TopDocs topDocs = indexSearcher.search(query, RESULT_LIMIT);
-
-           ArrayList<String> synonyms = new ArrayList<String>();
-
-            for (ScoreDoc topDoc : topDocs.scoreDocs) 
-            {            
-               String text = indexReader.storedFields().document(topDoc.doc).getField("text").stringValue();
-                if(text != null && !text.isEmpty())
-                {
-                 synonyms.add(text);
-                }
-            }
-            return synonyms;             
-        }
-        catch (IOException e)
-        {
-            logger.error("failed to get synonyms from index", e);
-           return new ArrayList<String>();
-        }
-
-    }    
 }
